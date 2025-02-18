@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
-const xml2js = require("xml2js"); // For parsing XML investment tables
+const xml2js = require("xml2js");
 const cron = require("node-cron");
 const nodemailer = require("nodemailer");
 
@@ -18,12 +18,10 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Read multiple recipients from .env
 const RECIPIENT_EMAILS = process.env.RECIPIENT_EMAILS
   ? process.env.RECIPIENT_EMAILS.split(",")
   : [];
 
-// SEC Filings URLs for NVIDIA (Fetching Only the 2 Most Recent Filings)
 const SEC_URLS = {
   "13F-HR":
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=13F-HR&dateb=&owner=exclude&count=2",
@@ -33,7 +31,7 @@ const SEC_URLS = {
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013G&dateb=&owner=exclude&count=2",
 };
 
-// Store only the last 2 filings for each type (Memory Storage)
+// Store last 2 filings for comparison
 let filingsData = {};
 
 /**
@@ -50,32 +48,61 @@ async function getPublicIP() {
 }
 
 /**
- * Scrape Latest SEC Filings for NVIDIA
+ * Fetch SEC Data with Headers & Retry Logic to Avoid 403 Errors
+ */
+async function fetchWithRetry(url, retries = 3, delay = 3000) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9",
+    Referer: "https://www.sec.gov/",
+  };
+
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await axios.get(url, { headers });
+      return response.data;
+    } catch (error) {
+      if (error.response && error.response.status === 403) {
+        console.warn(
+          `[SEC Blocked] Retrying (${i + 1}/${retries}) in ${delay / 1000}s...`
+        );
+        await new Promise((res) => setTimeout(res, delay));
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`[Error] Failed to fetch SEC data after ${retries} attempts`);
+}
+
+/**
+ * Scrape SEC Filings for NVIDIA
  */
 async function scrapeSecFilings() {
   let newFilings = {};
 
   for (const [filingType, url] of Object.entries(SEC_URLS)) {
     console.log(`[Scraper] Checking latest ${filingType} filings...`);
-    const { data } = await axios.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    const $ = cheerio.load(data);
+    try {
+      const data = await fetchWithRetry(url);
+      const $ = cheerio.load(data);
+      let filings = [];
 
-    let filings = [];
-    $("tr").each((index, element) => {
-      const linkElement = $(element).find("a[href*='Archives/edgar/data']");
-      const filingDate = $(element).find("td:nth-child(4)").text().trim();
+      $("tr").each((index, element) => {
+        const linkElement = $(element).find("a[href*='Archives/edgar/data']");
+        const filingDate = $(element).find("td:nth-child(4)").text().trim();
 
-      if (linkElement.length > 0) {
-        const filingLink = "https://www.sec.gov" + linkElement.attr("href");
-        filings.push({ filingDate, filingLink });
+        if (linkElement.length > 0) {
+          const filingLink = "https://www.sec.gov" + linkElement.attr("href");
+          filings.push({ filingDate, filingLink });
+        }
+      });
+
+      if (filings.length >= 2) {
+        newFilings[filingType] = [filings[0], filings[1]];
       }
-    });
-
-    // Store only the last 2 filings
-    if (filings.length >= 2) {
-      newFilings[filingType] = [filings[0], filings[1]]; // Latest two
+    } catch (error) {
+      console.error(`[Scraper] Error fetching SEC filings: ${error.message}`);
     }
   }
 
@@ -88,7 +115,57 @@ async function scrapeSecFilings() {
 }
 
 /**
- * Detect Changes Between Two Filings
+ * Compare Last Two Filings for Changes
+ */
+async function compareFilings(newFilings) {
+  let changes = [];
+
+  for (const [filingType, filings] of Object.entries(newFilings)) {
+    console.log(`[Comparison] Checking ${filingType}...`);
+    const oldFiling = filings[1];
+    const newFiling = filings[0];
+
+    let oldInvestments = await extractInvestmentData(oldFiling);
+    let newInvestments = await extractInvestmentData(newFiling);
+
+    let investmentChanges = detectChanges(oldInvestments, newInvestments);
+    if (investmentChanges.length > 0) {
+      changes.push(...investmentChanges);
+    }
+  }
+
+  if (changes.length > 0) {
+    console.log(`[Notifier] Sending email summary...`);
+    await sendEmailNotification(changes);
+  }
+}
+
+/**
+ * Extract Investment Data from XML or HTML Tables
+ */
+async function extractInvestmentData(filing) {
+  try {
+    const data = await fetchWithRetry(filing.filingLink);
+    const $ = cheerio.load(data);
+
+    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
+    if (xmlFileLink) {
+      return await extractInvestmentsFromXML(
+        "https://www.sec.gov" + xmlFileLink
+      );
+    }
+
+    return extractInvestmentsFromHTML($);
+  } catch (error) {
+    console.error(
+      `[Parser] Error fetching or parsing filing: ${error.message}`
+    );
+    return [];
+  }
+}
+
+/**
+ * Detect Investment Changes
  */
 function detectChanges(oldInvestments, newInvestments) {
   let changes = [];
@@ -115,97 +192,19 @@ function detectChanges(oldInvestments, newInvestments) {
 }
 
 /**
- * Compare the Last Two Filings to Detect Changes
+ * Manual Trigger Endpoint
  */
-async function compareFilings(newFilings) {
-  let changes = [];
-
-  for (const [filingType, filings] of Object.entries(newFilings)) {
-    console.log(
-      `[Comparison] Checking differences in ${filingType} filings...`
-    );
-
-    const oldFiling = filings[1]; // Previous filing
-    const newFiling = filings[0]; // Latest filing
-
-    let oldInvestments = await extractInvestmentData(oldFiling);
-    let newInvestments = await extractInvestmentData(newFiling);
-
-    let investmentChanges = detectChanges(oldInvestments, newInvestments);
-    if (investmentChanges.length > 0) {
-      changes.push(...investmentChanges);
-    }
-  }
-
-  if (changes.length > 0) {
-    console.log(`[Notifier] Sending email summary...`);
-    await sendEmailNotification(changes);
-  }
-}
-
-/**
- * Extract Investment Data from XML or HTML Tables
- */
-async function extractInvestmentData(filing) {
-  try {
-    const { data } = await axios.get(filing.filingLink);
-    const $ = cheerio.load(data);
-
-    // Check if there's an external XML file (e.g., information_table.xml)
-    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
-    if (xmlFileLink) {
-      xmlFileLink = "https://www.sec.gov" + xmlFileLink;
-      console.log(`[Parser] Found XML file: ${xmlFileLink}`);
-      return await extractInvestmentsFromXML(xmlFileLink);
-    }
-
-    console.log("[Parser] No XML file found. Checking HTML tables...");
-    return extractInvestmentsFromHTML($);
-  } catch (error) {
-    console.error("[Parser] Failed to fetch or parse filing:", error.message);
-    return [];
-  }
-}
-
-/**
- * Send Email Notification
- */
-async function sendEmailNotification(changes) {
-  let publicIP = await getPublicIP();
-  let triggerURL = `http://${publicIP}:${PORT}/run-scraper`;
-
-  let emailBody = `<h3>🚀 NVIDIA Investment Changes</h3><ul>`;
-  changes.forEach((change) => {
-    emailBody += `<li>${change}</li>`;
-  });
-  emailBody += `</ul><p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>`;
-  emailBody += `<p>🔗 <a href="${triggerURL}">Trigger Scraper</a></p>`;
-
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: RECIPIENT_EMAILS,
-    subject: `📢 NVIDIA Investment Alert`,
-    html: emailBody,
-  };
-
-  await transporter.sendMail(mailOptions);
-  console.log("[Notifier] Email sent successfully!");
-}
+app.get("/run-scraper", async (req, res) => {
+  console.log("[Manual Trigger] Running SEC filings check...");
+  await scrapeSecFilings();
+  res.json({ status: "success", message: "Investment scan completed." });
+});
 
 /**
  * Health Check Endpoint
  */
 app.get("/health", (req, res) => {
   res.json({ status: "running", timestamp: new Date().toISOString() });
-});
-
-/**
- * Manual Scraper Trigger
- */
-app.get("/run-scraper", async (req, res) => {
-  console.log("[Manual Trigger] Running SEC filings check...");
-  await scrapeSecFilings();
-  res.json({ status: "success", message: "Investment scan completed." });
 });
 
 // **Run Scraper Every Hour**
