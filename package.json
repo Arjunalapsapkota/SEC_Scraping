@@ -2,10 +2,10 @@
     "name": "nvidia-sec-scraper",
     "version": "1.0.0",
     "description": "A Node.js scraper for tracking NVIDIA SEC filings (13F, 8-K, 13D, 13G, 10-Q, 10-K) and sending email notifications.",
-    "main": "index.js",
+    "main": "server.js",
     "scripts": {
-      "start": "node index.js",
-      "dev": "nodemon index.js"
+      "start": "node server.js",
+      "dev": "nodemon server.js"
     },
     "dependencies": {
       "axios": "^1.5.1",
