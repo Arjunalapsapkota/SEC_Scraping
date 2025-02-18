@@ -88,6 +88,33 @@ async function scrapeSecFilings() {
 }
 
 /**
+ * Detect Changes Between Two Filings
+ */
+function detectChanges(oldInvestments, newInvestments) {
+  let changes = [];
+
+  newInvestments.forEach((newInv) => {
+    const oldInv = oldInvestments.find((inv) => inv.company === newInv.company);
+
+    if (!oldInv) {
+      changes.push(
+        `🟢 New Investment in **${newInv.company}** - ${newInv.shares} shares worth $${newInv.value}`
+      );
+    } else if (newInv.shares > oldInv.shares) {
+      changes.push(
+        `🔺 Increased stake in **${newInv.company}** - Now ${newInv.shares} shares (previously ${oldInv.shares})`
+      );
+    } else if (newInv.shares < oldInv.shares) {
+      changes.push(
+        `🔻 Reduced stake in **${newInv.company}** - Now ${newInv.shares} shares (previously ${oldInv.shares})`
+      );
+    }
+  });
+
+  return changes;
+}
+
+/**
  * Compare the Last Two Filings to Detect Changes
  */
 async function compareFilings(newFilings) {
