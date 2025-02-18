@@ -117,6 +117,30 @@ async function compareFilings(newFilings) {
 }
 
 /**
+ * Extract Investment Data from XML or HTML Tables
+ */
+async function extractInvestmentData(filing) {
+  try {
+    const { data } = await axios.get(filing.filingLink);
+    const $ = cheerio.load(data);
+
+    // Check if there's an external XML file (e.g., information_table.xml)
+    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
+    if (xmlFileLink) {
+      xmlFileLink = "https://www.sec.gov" + xmlFileLink;
+      console.log(`[Parser] Found XML file: ${xmlFileLink}`);
+      return await extractInvestmentsFromXML(xmlFileLink);
+    }
+
+    console.log("[Parser] No XML file found. Checking HTML tables...");
+    return extractInvestmentsFromHTML($);
+  } catch (error) {
+    console.error("[Parser] Failed to fetch or parse filing:", error.message);
+    return [];
+  }
+}
+
+/**
  * Send Email Notification
  */
 async function sendEmailNotification(changes) {
