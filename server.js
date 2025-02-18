@@ -149,7 +149,38 @@ async function processFilings(filings) {
     console.log(
       `[Processing] Extracting investments from ${filing.filingLink}...`
     );
-    await sendEmailNotification(filings);
+
+    const { data } = await axios.get(filing.filingLink, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+
+    const $ = cheerio.load(data);
+    let investments = [];
+
+    $("table tbody tr").each((index, element) => {
+      const company = $(element).find("td:nth-child(1)").text().trim();
+      const shares = $(element).find("td:nth-child(2)").text().trim();
+      const value = $(element).find("td:nth-child(3)").text().trim();
+
+      if (company && shares && value) {
+        let change = determineInvestmentChange(
+          company,
+          shares,
+          filing.filingType
+        );
+        if (change) {
+          investmentChanges.push({ company, shares, value, change, filing });
+        }
+        investments.push({ company, shares, value });
+      }
+    });
+
+    storeFiling(filing.filingDate, filing.filingType, filing.filingLink);
+  }
+
+  if (investmentChanges.length > 0) {
+    console.log(`[Notifier] Sending email summary...`);
+    await sendEmailNotification(investmentChanges);
   }
 }
 
@@ -163,7 +194,7 @@ async function sendEmailNotification(filings) {
   let filingDetails = filings
     .map(
       (filing) =>
-        `<li>📜 **${filing.filingType}** - Date: ${filing.filingDate} | <a href="${filing.filingLink}">View Filing</a></li>`
+        `<li>📜 **${filing.change}** - ${filing.company}, Shares: ${filing.shares}, Value: ${filing.value} | <a href="${filing.filing.filingLink}">View Filing</a></li>`
     )
     .join("");
 
