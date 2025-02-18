@@ -111,59 +111,91 @@ function isFilingStored(date, type, link) {
 }
 
 /**
- * Send email notification summarizing investment changes
+ * Detects Investment Changes (New, Increased, Reduced, Exited)
  */
-async function sendEmailNotification(filings) {
-  try {
-    let publicIP = await getPublicIP();
-    let triggerURL = `http://${publicIP}:${PORT}/run-scraper`;
+function determineInvestmentChange(company, newShares, filingType) {
+  const fileData = fs.readFileSync(CSV_FILE, "utf8");
+  const rows = fileData.split("\n").map((row) => row.split(","));
 
-    let filingDetails = filings
-      .map(
-        (filing) =>
-          `<li>📜 **${filing.filingType}** - Date: ${filing.filingDate} | <a href="${filing.filingLink}">View Filing</a></li>`
-      )
-      .join("");
+  for (let row of rows) {
+    if (row.length > 2 && row[2] === company) {
+      const oldShares = parseInt(row[3].replace(/,/g, ""), 10);
+      const newSharesInt = parseInt(newShares.replace(/,/g, ""), 10);
 
-    const emailBody = `
-            <h3>🚀 NVIDIA Investment Activity Detected</h3>
-            <p>The following SEC filings were found:</p>
-            <ul>${filingDetails}</ul>
-            <br>
-            <p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>
-            <p>🔗 <strong>Trigger the scraper manually:</strong> <a href="${triggerURL}">${triggerURL}</a></p>
-        `;
+      if (newSharesInt > oldShares) return "🔺 Increased Stake";
+      if (newSharesInt < oldShares && newSharesInt > 0)
+        return "🔻 Reduced Stake";
+      if (newSharesInt === 0) return "❌ Exited Investment";
+    }
+  }
 
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: RECIPIENT_EMAILS,
-      subject: `📢 NVIDIA Investment Filings Alert`,
-      html: emailBody,
-    };
+  if (
+    (filingType === "SC 13D" || filingType === "SC 13G") &&
+    newShares === "0"
+  ) {
+    return "❌ Exited Investment (Ownership Below 5%)";
+  }
 
-    await transporter.sendMail(mailOptions);
-    console.log("[Notifier] Email sent successfully!");
-  } catch (error) {
-    console.error("[Notifier] Error sending email:", error.message);
+  return "🟢 New Investment";
+}
+
+/**
+ * Process Filings to Extract Investment Data
+ */
+async function processFilings(filings) {
+  let investmentChanges = [];
+
+  for (const filing of filings) {
+    console.log(
+      `[Processing] Extracting investments from ${filing.filingLink}...`
+    );
+    await sendEmailNotification(filings);
   }
 }
 
-// **Run scraper every hour**
-cron.schedule("0 * * * *", () => {
-  scrapeSecFilings();
-  console.log("[Cron] Hourly SEC filing check executed.");
-});
+/**
+ * Send Email Notification
+ */
+async function sendEmailNotification(filings) {
+  let publicIP = await getPublicIP();
+  let triggerURL = `http://${publicIP}:${PORT}/run-scraper`;
+
+  let filingDetails = filings
+    .map(
+      (filing) =>
+        `<li>📜 **${filing.filingType}** - Date: ${filing.filingDate} | <a href="${filing.filingLink}">View Filing</a></li>`
+    )
+    .join("");
+
+  const emailBody = `
+        <h3>🚀 NVIDIA Investment Activity Detected</h3>
+        <ul>${filingDetails}</ul>
+        <p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>
+        <p>🔗 <strong>Trigger the scraper manually:</strong> <a href="${triggerURL}">${triggerURL}</a></p>
+    `;
+
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: RECIPIENT_EMAILS,
+    subject: `📢 NVIDIA Investment Filings Alert`,
+    html: emailBody,
+  };
+
+  await transporter.sendMail(mailOptions);
+  console.log("[Notifier] Email sent successfully!");
+}
+
+// **Run Scraper Every Hour**
+cron.schedule("0 * * * *", () => scrapeSecFilings());
 
 // **Manual Trigger Endpoint**
 app.get("/run-scraper", async (req, res) => {
-  console.log("[Manual Trigger] Running SEC filings check...");
   await scrapeSecFilings();
   res.json({ status: "success", message: "Investment scan completed." });
 });
 
 // **Start Server**
 app.listen(PORT, async () => {
-  let publicIP = await getPublicIP();
-  console.log(`[Server] Running on http://${publicIP}:${PORT}`);
+  console.log(`[Server] Running on port ${PORT}`);
   scrapeSecFilings();
 });
