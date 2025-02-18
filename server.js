@@ -96,7 +96,7 @@ async function scrapeSecFilings() {
 }
 
 /**
- * Process Latest Filings to Extract Investment Data
+ * Process Latest Filings to Extract Real Investment Data
  */
 async function processFilings(filings) {
   let investmentChanges = [];
@@ -112,9 +112,15 @@ async function processFilings(filings) {
 
     const $ = cheerio.load(data);
 
-    // Extract investment details from the filing
-    let investments = [];
-    $("table tbody tr").each((index, element) => {
+    // Locate the correct investment data table
+    let investmentTable = $("table:contains('INFORMATION TABLE')");
+    if (investmentTable.length === 0) {
+      console.log("[Warning] No valid investment data found.");
+      continue;
+    }
+
+    // Extract investment details
+    investmentTable.find("tr").each((index, element) => {
       const company = $(element).find("td:nth-child(1)").text().trim();
       const shares = $(element).find("td:nth-child(2)").text().trim();
       const value = $(element).find("td:nth-child(3)").text().trim();
@@ -124,7 +130,8 @@ async function processFilings(filings) {
         company &&
         shares &&
         value &&
-        !company.includes("SUBMISSION TEXT FILE")
+        company.length > 2 &&
+        !company.includes("INFORMATION TABLE")
       ) {
         let change = determineInvestmentChange(
           company,
