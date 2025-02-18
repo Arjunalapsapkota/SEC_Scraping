@@ -102,6 +102,30 @@ async function scrapeSecFilings() {
 }
 
 /**
+ * Extract Investment Data from SEC Filings
+ */
+async function extractInvestmentData(filing) {
+  try {
+    const data = await fetchWithRetry(filing.filingLink);
+    const $ = cheerio.load(data);
+
+    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
+    if (xmlFileLink) {
+      return await extractInvestmentsFromXML(
+        "https://www.sec.gov" + xmlFileLink
+      );
+    }
+
+    return extractInvestmentsFromHTML($);
+  } catch (error) {
+    console.error(
+      `[Parser] Error fetching or parsing filing: ${error.message}`
+    );
+    return [];
+  }
+}
+
+/**
  * Compare Last Two Filings for Changes
  */
 async function compareFilings(newFilings) {
