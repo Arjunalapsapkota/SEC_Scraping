@@ -102,30 +102,6 @@ async function scrapeSecFilings() {
 }
 
 /**
- * Extract Investment Data from SEC Filings
- */
-async function extractInvestmentData(filing) {
-  try {
-    const data = await fetchWithRetry(filing.filingLink);
-    const $ = cheerio.load(data);
-
-    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
-    if (xmlFileLink) {
-      return await extractInvestmentsFromXML(
-        "https://www.sec.gov" + xmlFileLink
-      );
-    }
-
-    return extractInvestmentsFromHTML($);
-  } catch (error) {
-    console.error(
-      `[Parser] Error fetching or parsing filing: ${error.message}`
-    );
-    return [];
-  }
-}
-
-/**
  * Compare Last Two Filings for Changes
  */
 async function compareFilings(newFilings) {
@@ -152,12 +128,36 @@ async function compareFilings(newFilings) {
 }
 
 /**
- * Extract Investments from XML Files
+ * Extract Investment Data from SEC Filings
+ */
+async function extractInvestmentData(filing) {
+  try {
+    const data = await fetchWithRetry(filing.filingLink);
+    const $ = cheerio.load(data);
+
+    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
+    if (xmlFileLink) {
+      return await extractInvestmentsFromXML(
+        "https://www.sec.gov" + xmlFileLink
+      );
+    }
+
+    return extractInvestmentsFromHTML($);
+  } catch (error) {
+    console.error(
+      `[Parser] Error fetching or parsing filing: ${error.message}`
+    );
+    return [];
+  }
+}
+
+/**
+ * Fix XML Parsing Issue & Extract Investments from XML
  */
 async function extractInvestmentsFromXML(xmlFileLink) {
   try {
     const data = await fetchWithRetry(xmlFileLink);
-    const parser = new xml2js.Parser({ explicitArray: false });
+    const parser = new xml2js.Parser({ strict: false }); // Allow invalid XML
 
     return new Promise((resolve) => {
       parser.parseString(data, (err, result) => {
@@ -188,22 +188,30 @@ async function extractInvestmentsFromXML(xmlFileLink) {
 }
 
 /**
- * Extract Investments from HTML Tables (Fallback)
+ * Detect Investment Changes
  */
-function extractInvestmentsFromHTML($) {
-  let investments = [];
+function detectChanges(oldInvestments, newInvestments) {
+  let changes = [];
 
-  $("table tbody tr").each((index, element) => {
-    const company = $(element).find("td:nth-child(1)").text().trim();
-    const shares = $(element).find("td:nth-child(2)").text().trim();
-    const value = $(element).find("td:nth-child(3)").text().trim();
+  newInvestments.forEach((newInv) => {
+    const oldInv = oldInvestments.find((inv) => inv.company === newInv.company);
 
-    if (company && shares && value && company.length > 2) {
-      investments.push({ company, shares, value });
+    if (!oldInv) {
+      changes.push(
+        `🟢 New Investment in **${newInv.company}** - ${newInv.shares} shares worth $${newInv.value}`
+      );
+    } else if (newInv.shares > oldInv.shares) {
+      changes.push(
+        `🔺 Increased stake in **${newInv.company}** - Now ${newInv.shares} shares (previously ${oldInv.shares})`
+      );
+    } else if (newInv.shares < oldInv.shares) {
+      changes.push(
+        `🔻 Reduced stake in **${newInv.company}** - Now ${newInv.shares} shares (previously ${oldInv.shares})`
+      );
     }
   });
 
-  return investments;
+  return changes;
 }
 
 /**
