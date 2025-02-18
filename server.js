@@ -198,35 +198,19 @@ async function sendEmailNotification(filings) {
     )
     .join("");
 
-  const emailBody = `
-        <h3>🚀 NVIDIA Investment Activity Detected</h3>
-        <ul>${filingDetails}</ul>
-        <p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>
-        <p>🔗 <strong>Trigger the scraper manually:</strong> <a href="${triggerURL}">${triggerURL}</a></p>
-    `;
-
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: RECIPIENT_EMAILS,
     subject: `📢 NVIDIA Investment Filings Alert`,
-    html: emailBody,
+    html: `<h3>🚀 NVIDIA Investment Activity Detected</h3><ul>${filingDetails}</ul><p>📍 <strong>Public IP:</strong> ${publicIP}</p><p>🔗 <a href="${triggerURL}">Trigger Scraper</a></p>`,
   };
 
   await transporter.sendMail(mailOptions);
   console.log("[Notifier] Email sent successfully!");
 }
 
-// **Run Scraper Every Hour**
-cron.schedule("0 * * * *", () => scrapeSecFilings());
-
-// **Manual Trigger Endpoint**
-app.get("/run-scraper", async (req, res) => {
-  await scrapeSecFilings();
-  res.json({ status: "success", message: "Investment scan completed." });
-});
-
 // **Start Server**
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`[Server] Running on port ${PORT}`);
   scrapeSecFilings();
 });
