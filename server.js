@@ -35,19 +35,6 @@ const SEC_URLS = {
 let filingsData = {};
 
 /**
- * Fetch Public IP Address of the Server
- */
-async function getPublicIP() {
-  try {
-    const response = await axios.get("https://api64.ipify.org?format=json");
-    return response.data.ip;
-  } catch (error) {
-    console.error("[Error] Unable to fetch Public IP:", error.message);
-    return "UNKNOWN_IP";
-  }
-}
-
-/**
  * Fetch SEC Data with Headers & Retry Logic to Avoid 403 Errors
  */
 async function fetchWithRetry(url, retries = 3, delay = 3000) {
@@ -162,6 +149,25 @@ async function extractInvestmentData(filing) {
     );
     return [];
   }
+}
+
+/**
+ * Extract Investments from HTML Tables (Fallback)
+ */
+function extractInvestmentsFromHTML($) {
+  let investments = [];
+
+  $("table tbody tr").each((index, element) => {
+    const company = $(element).find("td:nth-child(1)").text().trim();
+    const shares = $(element).find("td:nth-child(2)").text().trim();
+    const value = $(element).find("td:nth-child(3)").text().trim();
+
+    if (company && shares && value && company.length > 2) {
+      investments.push({ company, shares, value });
+    }
+  });
+
+  return investments;
 }
 
 /**
