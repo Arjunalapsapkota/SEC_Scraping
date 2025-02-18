@@ -19,12 +19,12 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Read recipient emails (supports multiple recipients)
+// Read multiple recipients from .env
 const RECIPIENT_EMAILS = process.env.RECIPIENT_EMAILS
   ? process.env.RECIPIENT_EMAILS.split(",")
   : [];
 
-// SEC Filings URLs
+// SEC Filings URLs for NVIDIA
 const SEC_URLS = {
   "13F-HR":
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=13F-HR&dateb=&owner=exclude&count=40",
@@ -36,10 +36,10 @@ const SEC_URLS = {
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013G&dateb=&owner=exclude&count=40",
 };
 
-// CSV File to store past filings
+// CSV File to Store Past Filings
 const CSV_FILE = "nvidia_investments.csv";
 
-// Ensure CSV exists
+// Ensure CSV file exists
 if (!fs.existsSync(CSV_FILE)) {
   fs.writeFileSync(CSV_FILE, "Date,Type,Company,Shares,Value,Change,Link\n");
 }
@@ -58,43 +58,40 @@ async function getPublicIP() {
 }
 
 /**
- * Scrape SEC for NVIDIA's filings (Tracks 13F-HR, 8-K, SC 13D, SC 13G)
+ * Scrape Multiple SEC Filings for NVIDIA
  */
-async function scrapeInvestmentFilings() {
-  let investmentChanges = [];
+async function scrapeSecFilings() {
+  let allNewFilings = [];
 
-  for (const [filingType, secUrl] of Object.entries(SEC_URLS)) {
+  for (const [filingType, url] of Object.entries(SEC_URLS)) {
     console.log(`[Scraper] Checking ${filingType} filings...`);
+    const { data } = await axios.get(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    const $ = cheerio.load(data);
 
-    try {
-      const { data } = await axios.get(secUrl, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-      const $ = cheerio.load(data);
+    $("tr").each((index, element) => {
+      const linkElement = $(element).find("a[href*='Archives/edgar/data']");
+      const filingDate = $(element).find("td:nth-child(4)").text().trim();
 
-      $("tr").each((index, element) => {
-        const linkElement = $(element).find("a[href*='Archives/edgar/data']");
-        const filingDate = $(element).find("td:nth-child(4)").text().trim();
+      if (linkElement.length > 0) {
+        const filingLink = "https://www.sec.gov" + linkElement.attr("href");
 
-        if (linkElement.length > 0) {
-          const filingLink = "https://www.sec.gov" + linkElement.attr("href");
-
-          if (!isFilingStored(filingDate, filingType, filingLink)) {
-            investmentChanges.push({ filingType, filingDate, filingLink });
-            storeFiling(filingDate, filingType, filingLink);
-          }
+        if (!isFilingStored(filingDate, filingType, filingLink)) {
+          allNewFilings.push({ filingType, filingDate, filingLink });
+          storeFiling(filingDate, filingType, filingLink);
         }
-      });
-    } catch (error) {
-      console.error(`[Error] Failed to fetch ${filingType}:`, error.message);
-    }
+      }
+    });
   }
 
-  if (investmentChanges.length > 0) {
-    console.log(`[Notifier] Sending email with detected investment changes...`);
-    await sendEmailNotification(investmentChanges);
+  if (allNewFilings.length > 0) {
+    console.log(
+      `[Scraper] Found ${allNewFilings.length} new filing(s). Processing...`
+    );
+    await processFilings(allNewFilings);
   } else {
-    console.log("[Scraper] No new investment changes found.");
+    console.log("[Scraper] No new investment filings found.");
   }
 }
 
@@ -102,7 +99,7 @@ async function scrapeInvestmentFilings() {
  * Store the filing details in a CSV file
  */
 function storeFiling(date, type, link) {
-  fs.appendFileSync(CSV_FILE, `${date},${type},N/A,N/A,N/A,${link}\n`);
+  fs.appendFileSync(CSV_FILE, `${date},${type},N/A,N/A,N/A,N/A,${link}\n`);
 }
 
 /**
@@ -116,22 +113,22 @@ function isFilingStored(date, type, link) {
 /**
  * Send email notification summarizing investment changes
  */
-async function sendEmailNotification(changes) {
+async function sendEmailNotification(filings) {
   try {
     let publicIP = await getPublicIP();
     let triggerURL = `http://${publicIP}:${PORT}/run-scraper`;
 
-    let changeDetails = changes
+    let filingDetails = filings
       .map(
-        (change) =>
-          `<li>${change.filingType} - Date: ${change.filingDate} | <a href="${change.filingLink}">View Filing</a></li>`
+        (filing) =>
+          `<li>📜 **${filing.filingType}** - Date: ${filing.filingDate} | <a href="${filing.filingLink}">View Filing</a></li>`
       )
       .join("");
 
     const emailBody = `
             <h3>🚀 NVIDIA Investment Activity Detected</h3>
             <p>The following SEC filings were found:</p>
-            <ul>${changeDetails}</ul>
+            <ul>${filingDetails}</ul>
             <br>
             <p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>
             <p>🔗 <strong>Trigger the scraper manually:</strong> <a href="${triggerURL}">${triggerURL}</a></p>
@@ -145,7 +142,7 @@ async function sendEmailNotification(changes) {
     };
 
     await transporter.sendMail(mailOptions);
-    console.log("[Notifier] Email sent successfully with investment updates!");
+    console.log("[Notifier] Email sent successfully!");
   } catch (error) {
     console.error("[Notifier] Error sending email:", error.message);
   }
@@ -153,14 +150,14 @@ async function sendEmailNotification(changes) {
 
 // **Run scraper every hour**
 cron.schedule("0 * * * *", () => {
-  scrapeInvestmentFilings();
-  console.log("[Cron] Hourly investment tracking executed.");
+  scrapeSecFilings();
+  console.log("[Cron] Hourly SEC filing check executed.");
 });
 
 // **Manual Trigger Endpoint**
 app.get("/run-scraper", async (req, res) => {
   console.log("[Manual Trigger] Running SEC filings check...");
-  await scrapeInvestmentFilings();
+  await scrapeSecFilings();
   res.json({ status: "success", message: "Investment scan completed." });
 });
 
@@ -168,5 +165,5 @@ app.get("/run-scraper", async (req, res) => {
 app.listen(PORT, async () => {
   let publicIP = await getPublicIP();
   console.log(`[Server] Running on http://${publicIP}:${PORT}`);
-  scrapeInvestmentFilings();
+  scrapeSecFilings();
 });
