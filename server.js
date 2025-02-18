@@ -31,9 +31,6 @@ const SEC_URLS = {
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013G&dateb=&owner=exclude&count=2",
 };
 
-// Store last 2 filings for comparison
-let filingsData = {};
-
 /**
  * Fetch SEC Data with Headers & Retry Logic to Avoid 403 Errors
  */
@@ -60,6 +57,77 @@ async function fetchWithRetry(url, retries = 3, delay = 3000) {
     }
   }
   throw new Error(`[Error] Failed to fetch SEC data after ${retries} attempts`);
+}
+
+/**
+ * Extract Investment Data from XML Filings
+ */
+async function extractInvestmentsFromXML(xmlFileLink) {
+  try {
+    const data = await fetchWithRetry(xmlFileLink);
+    const parser = new xml2js.Parser({ strict: false, explicitArray: false });
+
+    return new Promise((resolve) => {
+      parser.parseString(data, (err, result) => {
+        if (err) {
+          console.error("[Parser] Error parsing XML:", err);
+          resolve([]);
+          return;
+        }
+
+        console.log("[Parser] Successfully parsed XML.");
+
+        // Check if `informationTable` exists and has `infoTable`
+        if (
+          !result ||
+          !result.informationTable ||
+          !result.informationTable.infoTable
+        ) {
+          console.warn("[Parser] No valid investment data found in XML.");
+          console.log(
+            "[Parser] XML Structure:",
+            JSON.stringify(result, null, 2)
+          );
+          resolve([]);
+          return;
+        }
+
+        const holdings = Array.isArray(result.informationTable.infoTable)
+          ? result.informationTable.infoTable
+          : [result.informationTable.infoTable];
+
+        resolve(
+          holdings.map((entry) => ({
+            company: entry.nameOfIssuer || "Unknown",
+            shares: entry.shrsOrPrnAmt?.sshPrnamt || "0",
+            value: entry.value || "0",
+          }))
+        );
+      });
+    });
+  } catch (error) {
+    console.error("[Parser] Failed to fetch or parse XML:", error.message);
+    return [];
+  }
+}
+
+/**
+ * Extract Investments from HTML Filings (Fallback if XML is missing)
+ */
+function extractInvestmentsFromHTML($) {
+  let investments = [];
+
+  $("table tbody tr").each((index, element) => {
+    const company = $(element).find("td:nth-child(1)").text().trim();
+    const shares = $(element).find("td:nth-child(2)").text().trim();
+    const value = $(element).find("td:nth-child(3)").text().trim();
+
+    if (company && shares && value && company.length > 2) {
+      investments.push({ company, shares, value });
+    }
+  });
+
+  return investments;
 }
 
 /**
@@ -102,90 +170,20 @@ async function scrapeSecFilings() {
 }
 
 /**
- * Compare Last Two Filings for Changes
+ * Health Check Endpoint
  */
-async function compareFilings(newFilings) {
-  let changes = [];
-
-  for (const [filingType, filings] of Object.entries(newFilings)) {
-    console.log(`[Comparison] Checking ${filingType}...`);
-    const oldFiling = filings[1];
-    const newFiling = filings[0];
-
-    let oldInvestments = await extractInvestmentData(oldFiling);
-    let newInvestments = await extractInvestmentData(newFiling);
-
-    let investmentChanges = detectChanges(oldInvestments, newInvestments);
-    if (investmentChanges.length > 0) {
-      changes.push(...investmentChanges);
-    }
-  }
-
-  if (changes.length > 0) {
-    console.log(`[Notifier] Sending email summary...`);
-    await sendEmailNotification(changes);
-  }
-}
+app.get("/health", (req, res) => {
+  res.json({ status: "running", timestamp: new Date().toISOString() });
+});
 
 /**
- * Extract Investment Data from SEC Filings
+ * Manual Trigger Endpoint
  */
-async function extractInvestmentData(filing) {
-  try {
-    const data = await fetchWithRetry(filing.filingLink);
-    const $ = cheerio.load(data);
-
-    let xmlFileLink = $("a[href*='information_table.xml']").attr("href");
-    if (xmlFileLink) {
-      return await extractInvestmentsFromXML(
-        "https://www.sec.gov" + xmlFileLink
-      );
-    }
-
-    return extractInvestmentsFromHTML($);
-  } catch (error) {
-    console.error(
-      `[Parser] Error fetching or parsing filing: ${error.message}`
-    );
-    return [];
-  }
-}
-
-/**
- * Fix XML Parsing Issue & Extract Investments from XML
- */
-async function extractInvestmentsFromXML(xmlFileLink) {
-  try {
-    const data = await fetchWithRetry(xmlFileLink);
-    const parser = new xml2js.Parser({ strict: false }); // Allow invalid XML
-
-    return new Promise((resolve) => {
-      parser.parseString(data, (err, result) => {
-        if (err) {
-          console.error("[Parser] Error parsing XML:", err);
-          resolve([]);
-        }
-
-        const holdings = result["informationTable"]["infoTable"];
-        if (!holdings || !Array.isArray(holdings)) {
-          console.log("[Parser] No valid holdings found in XML.");
-          resolve([]);
-        }
-
-        resolve(
-          holdings.map((entry) => ({
-            company: entry["nameOfIssuer"],
-            shares: entry["shrsOrPrnAmt"]["sshPrnamt"],
-            value: entry["value"],
-          }))
-        );
-      });
-    });
-  } catch (error) {
-    console.error("[Parser] Failed to fetch or parse XML:", error.message);
-    return [];
-  }
-}
+app.get("/run-scraper", async (req, res) => {
+  console.log("[Manual Trigger] Running SEC filings check...");
+  await scrapeSecFilings();
+  res.json({ status: "success", message: "Investment scan completed." });
+});
 
 /**
  * Detect Investment Changes
@@ -213,22 +211,6 @@ function detectChanges(oldInvestments, newInvestments) {
 
   return changes;
 }
-
-/**
- * Manual Trigger Endpoint
- */
-app.get("/run-scraper", async (req, res) => {
-  console.log("[Manual Trigger] Running SEC filings check...");
-  await scrapeSecFilings();
-  res.json({ status: "success", message: "Investment scan completed." });
-});
-
-/**
- * Health Check Endpoint
- */
-app.get("/health", (req, res) => {
-  res.json({ status: "running", timestamp: new Date().toISOString() });
-});
 
 // **Run Scraper Every Hour**
 cron.schedule("0 * * * *", () => scrapeSecFilings());
