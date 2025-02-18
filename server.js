@@ -22,12 +22,10 @@ const RECIPIENT_EMAILS = process.env.RECIPIENT_EMAILS
   ? process.env.RECIPIENT_EMAILS.split(",")
   : [];
 
-// SEC Filings URLs for NVIDIA
+// SEC Filings URLs for NVIDIA (Fetching Only the Latest Filing)
 const SEC_URLS = {
   "13F-HR":
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=13F-HR&dateb=&owner=exclude&count=1",
-  "8-K":
-    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K&dateb=&owner=exclude&count=1",
   "SC 13D":
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013D&dateb=&owner=exclude&count=1",
   "SC 13G":
@@ -114,18 +112,28 @@ async function processFilings(filings) {
 
     const $ = cheerio.load(data);
 
-    let company = $("table tbody tr td:nth-child(1)").text().trim();
-    let shares = $("table tbody tr td:nth-child(2)").text().trim();
-    let value = $("table tbody tr td:nth-child(3)").text().trim();
+    // Extract investment details from the filing
+    let investments = [];
+    $("table tbody tr").each((index, element) => {
+      const company = $(element).find("td:nth-child(1)").text().trim();
+      const shares = $(element).find("td:nth-child(2)").text().trim();
+      const value = $(element).find("td:nth-child(3)").text().trim();
 
-    if (company && shares && value) {
-      let change = determineInvestmentChange(
-        company,
-        shares,
-        filing.filingType
-      );
-      investmentChanges.push({ company, shares, value, change, filing });
-    }
+      // **Filter out metadata (XBRL, Submission Text, etc.)**
+      if (
+        company &&
+        shares &&
+        value &&
+        !company.includes("SUBMISSION TEXT FILE")
+      ) {
+        let change = determineInvestmentChange(
+          company,
+          shares,
+          filing.filingType
+        );
+        investmentChanges.push({ company, shares, value, change, filing });
+      }
+    });
   }
 
   if (investmentChanges.length > 0) {
@@ -146,7 +154,7 @@ function determineInvestmentChange(company, newShares, filingType) {
 }
 
 /**
- * Send Email Notification (Only Shows the Most Recent Filings)
+ * Send Cleaned Email Notification (Only Shows the Most Recent Filings)
  */
 async function sendEmailNotification(filings) {
   let publicIP = await getPublicIP();
