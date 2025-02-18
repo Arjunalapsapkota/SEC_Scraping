@@ -10,7 +10,7 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Email Configuration (Read from .env)
+// Email Configuration
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -19,67 +19,82 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const RECIPIENT_EMAIL = process.env.RECIPIENT_EMAIL;
+// Read recipient emails (supports multiple recipients)
+const RECIPIENT_EMAILS = process.env.RECIPIENT_EMAILS
+  ? process.env.RECIPIENT_EMAILS.split(",")
+  : [];
 
-// SEC Filings Page for NVIDIA
-const SEC_URL =
-  "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=&dateb=&owner=exclude&count=40";
+// SEC Filings URLs
+const SEC_URLS = {
+  "13F-HR":
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=13F-HR&dateb=&owner=exclude&count=40",
+  "8-K":
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K&dateb=&owner=exclude&count=40",
+  "SC 13D":
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013D&dateb=&owner=exclude&count=40",
+  "SC 13G":
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=SC%2013G&dateb=&owner=exclude&count=40",
+};
 
-// Filings categorized by frequency
-const HIGH_PRIORITY_FILINGS = ["13F-HR", "8-K", "SC 13D", "SC 13G"];
-const LONG_TERM_FILINGS = ["10-K", "10-Q"];
+// CSV File to store past filings
+const CSV_FILE = "nvidia_investments.csv";
 
-// CSV File for tracking
-const CSV_FILE = path.join(__dirname, "nvidia_sec_filings.csv");
-
-// Ensure CSV file exists
+// Ensure CSV exists
 if (!fs.existsSync(CSV_FILE)) {
   fs.writeFileSync(CSV_FILE, "Date,Type,Company,Shares,Value,Change,Link\n");
 }
 
 /**
- * Scrape SEC for NVIDIA's filings
+ * Fetch Public IP Address of the Server
  */
-async function scrapeSecFilings(filingsToTrack) {
+async function getPublicIP() {
   try {
-    console.log(
-      `[Scraper] Checking for NVIDIA ${filingsToTrack.join(", ")} filings...`
-    );
-
-    const { data } = await axios.get(SEC_URL, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    const $ = cheerio.load(data);
-    let newFilings = [];
-
-    $("tr").each((index, element) => {
-      const linkElement = $(element).find("a[href*='Archives/edgar/data']");
-      const filingType = $(element).find("td:nth-child(1)").text().trim();
-      const filingDate = $(element).find("td:nth-child(4)").text().trim();
-
-      if (linkElement.length > 0 && filingsToTrack.includes(filingType)) {
-        const filingLink = "https://www.sec.gov" + linkElement.attr("href");
-
-        if (!isFilingStored(filingDate, filingType, filingLink)) {
-          storeFiling(filingDate, filingType, filingLink);
-          newFilings.push({ filingType, filingDate, filingLink });
-        }
-      }
-    });
-
-    if (newFilings.length > 0) {
-      console.log(
-        `[Scraper] Found ${newFilings.length} new relevant filing(s). Sending email...`
-      );
-      await sendEmailNotification(newFilings);
-    } else {
-      console.log("[Scraper] No new relevant filings found.");
-    }
-
-    return newFilings;
+    const response = await axios.get("https://api64.ipify.org?format=json");
+    return response.data.ip;
   } catch (error) {
-    console.error("[Scraper] Error fetching SEC filings:", error.message);
-    return [];
+    console.error("[Error] Unable to fetch Public IP:", error.message);
+    return "UNKNOWN_IP";
+  }
+}
+
+/**
+ * Scrape SEC for NVIDIA's filings (Tracks 13F-HR, 8-K, SC 13D, SC 13G)
+ */
+async function scrapeInvestmentFilings() {
+  let investmentChanges = [];
+
+  for (const [filingType, secUrl] of Object.entries(SEC_URLS)) {
+    console.log(`[Scraper] Checking ${filingType} filings...`);
+
+    try {
+      const { data } = await axios.get(secUrl, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      const $ = cheerio.load(data);
+
+      $("tr").each((index, element) => {
+        const linkElement = $(element).find("a[href*='Archives/edgar/data']");
+        const filingDate = $(element).find("td:nth-child(4)").text().trim();
+
+        if (linkElement.length > 0) {
+          const filingLink = "https://www.sec.gov" + linkElement.attr("href");
+
+          if (!isFilingStored(filingDate, filingType, filingLink)) {
+            investmentChanges.push({ filingType, filingDate, filingLink });
+            storeFiling(filingDate, filingType, filingLink);
+          }
+        }
+      });
+    } catch (error) {
+      console.error(`[Error] Failed to fetch ${filingType}:`, error.message);
+    }
+  }
+
+  if (investmentChanges.length > 0) {
+    console.log(`[Notifier] Sending email with detected investment changes...`);
+    await sendEmailNotification(investmentChanges);
+  } else {
+    console.log("[Scraper] No new investment changes found.");
   }
 }
 
@@ -87,9 +102,7 @@ async function scrapeSecFilings(filingsToTrack) {
  * Store the filing details in a CSV file
  */
 function storeFiling(date, type, link) {
-  const csvData = `${date},${type},N/A,N/A,N/A,N/A,${link}\n`;
-  fs.appendFileSync(CSV_FILE, csvData);
-  console.log(`[Storage] Saved: ${type} - ${date}`);
+  fs.appendFileSync(CSV_FILE, `${date},${type},N/A,N/A,N/A,${link}\n`);
 }
 
 /**
@@ -101,82 +114,59 @@ function isFilingStored(date, type, link) {
 }
 
 /**
- * Send an email notification for new filings
+ * Send email notification summarizing investment changes
  */
-async function sendEmailNotification(filings) {
+async function sendEmailNotification(changes) {
   try {
-    let filingDetails = filings
+    let publicIP = await getPublicIP();
+    let triggerURL = `http://${publicIP}:${PORT}/run-scraper`;
+
+    let changeDetails = changes
       .map(
-        (filing) =>
-          `<li><strong>${filing.filingType}</strong> - Date: ${filing.filingDate} | <a href="${filing.filingLink}">View Filing</a></li>`
+        (change) =>
+          `<li>${change.filingType} - Date: ${change.filingDate} | <a href="${change.filingLink}">View Filing</a></li>`
       )
       .join("");
 
     const emailBody = `
-            <h3>🚀 New NVIDIA Investment Filings Detected</h3>
-            <p>The following SEC filings were recently published:</p>
-            <ul>${filingDetails}</ul>
+            <h3>🚀 NVIDIA Investment Activity Detected</h3>
+            <p>The following SEC filings were found:</p>
+            <ul>${changeDetails}</ul>
+            <br>
+            <p>📍 <strong>Server Public IP:</strong> ${publicIP}</p>
+            <p>🔗 <strong>Trigger the scraper manually:</strong> <a href="${triggerURL}">${triggerURL}</a></p>
         `;
 
     const mailOptions = {
       from: process.env.EMAIL_USER,
-      to: RECIPIENT_EMAIL,
-      subject: `📢 New SEC Filings for NVIDIA`,
+      to: RECIPIENT_EMAILS,
+      subject: `📢 NVIDIA Investment Filings Alert`,
       html: emailBody,
     };
 
     await transporter.sendMail(mailOptions);
-    console.log("[Notifier] Email sent successfully!");
+    console.log("[Notifier] Email sent successfully with investment updates!");
   } catch (error) {
     console.error("[Notifier] Error sending email:", error.message);
   }
 }
 
-// **Optimized Scraper Timing Based on SEC Filing Patterns**
-// 1️⃣ Every Hour: **Track 13F-HR, 8-K, 13D, 13G**
+// **Run scraper every hour**
 cron.schedule("0 * * * *", () => {
-  scrapeSecFilings(HIGH_PRIORITY_FILINGS);
-  console.log("[Cron] Hourly high-priority SEC filings check executed.");
+  scrapeInvestmentFilings();
+  console.log("[Cron] Hourly investment tracking executed.");
 });
 
-// 2️⃣ Peak Filing Windows (4 times per day) **10 AM, 1 PM, 4:30 PM, 8 PM ET**
-cron.schedule("0 10,13,16,20 * * *", () => {
-  scrapeSecFilings(HIGH_PRIORITY_FILINGS);
-  console.log("[Cron] Peak SEC filings check executed.");
-});
-
-// 3️⃣ Long-Term Reports (4 times per day) **6 AM, 12 PM, 6 PM, 11 PM ET**
-cron.schedule("0 6,12,18,23 * * *", () => {
-  scrapeSecFilings(LONG_TERM_FILINGS);
-  console.log("[Cron] Long-term SEC filings check executed.");
-});
-
-// 4️⃣ **Manual Trigger Endpoint**: `/run-scraper`
+// **Manual Trigger Endpoint**
 app.get("/run-scraper", async (req, res) => {
-  console.log("[Manual Trigger] Running SEC filings check on demand...");
-  const filings = await scrapeSecFilings([
-    ...HIGH_PRIORITY_FILINGS,
-    ...LONG_TERM_FILINGS,
-  ]);
-
-  if (filings.length > 0) {
-    res.json({
-      status: "success",
-      message: `Found ${filings.length} new filings. Email sent!`,
-      filings,
-    });
-  } else {
-    res.json({ status: "success", message: "No new filings found." });
-  }
+  console.log("[Manual Trigger] Running SEC filings check...");
+  await scrapeInvestmentFilings();
+  res.json({ status: "success", message: "Investment scan completed." });
 });
 
-// 5️⃣ Health Check Endpoint: `/health`
-app.get("/health", (req, res) => {
-  res.json({ status: "Running", lastChecked: new Date().toISOString() });
-});
-
-// Start Server
-app.listen(PORT, () => {
-  console.log(`[Server] Running on http://localhost:${PORT}`);
-  scrapeSecFilings(HIGH_PRIORITY_FILINGS); // Run immediately on startup
+// **Start Server**
+app.listen(PORT, async () => {
+  let publicIP = await getPublicIP();
+  console.log(`[Server] Running on http://${publicIP}:${PORT}`);
+  scrapeInvestmentFilings();
 });
